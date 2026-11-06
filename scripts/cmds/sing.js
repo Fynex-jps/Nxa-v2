@@ -1,178 +1,132 @@
-const fs = require("fs-extra");
-const axios = require("axios");
+const { getStreamFromURL } = global.utils;
 
-function formatDuration(ms) {
-	if (!ms)
-		return "";
-	const totalSeconds = Math.floor(ms / 1000);
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+function react(api, messageID, emoji) {
+        api.setMessageReaction(emoji, messageID, () => { }, true);
 }
 
-function extensionFrom(contentType) {
-	if (!contentType)
-		return "m4a";
-	const type = String(contentType).toLowerCase();
-	if (type.includes("mpeg") || type.includes("mp3"))
-		return "mp3";
-	if (type.includes("aac"))
-		return "aac";
-	if (type.includes("wav"))
-		return "wav";
-	if (type.includes("ogg"))
-		return "ogg";
-	return "m4a";
+function formatDuration(ms) {
+        const total = Math.floor((Number(ms) || 0) / 1000);
+        const m = Math.floor(total / 60);
+        const s = total % 60;
+        return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatTrack(track) {
+        const duration = track.duration ? ` (${formatDuration(track.duration)})` : "";
+        return `${track.title || "Unknown"}${track.artist ? ` - ${track.artist}` : ""}${duration}`;
+}
+
+async function sendAudio({ api, track, event, message, getLang }) {
+        if (!track.url) {
+                react(api, event.messageID, "❌");
+                return message.reply(getLang("noAudio", formatTrack(track)));
+        }
+        try {
+                const attachment = await getStreamFromURL(track.url, `track-${track.songId || track.id}.m4a`);
+                attachment.mimeType = "audio/mp4";
+                await message.reply({
+                        body: `🎵 ${formatTrack(track)}`,
+                        attachment
+                });
+                react(api, event.messageID, "✅");
+        }
+        catch (err) {
+                react(api, event.messageID, "❌");
+                await message.reply(getLang("error", err.error || err.message || JSON.stringify(err)));
+        }
+}
+
+function parseArgs(args) {
+        const rest = args.slice();
+        let count = 0;
+        for (let i = 0; i < rest.length; i++) {
+                if (rest[i] === "-c" || rest[i] === "--count" || rest[i] === "count") {
+                        const parsed = parseInt(rest[i + 1]);
+                        count = isNaN(parsed) ? 5 : Math.min(Math.max(parsed, 1), 10);
+                        rest.splice(i, 2);
+                        break;
+                }
+        }
+        return { count, query: rest.join(" ").trim() };
 }
 
 module.exports = {
-	config: {
-		name: "sing",
-		aliases: ["song"],
-		version: "1.0",
-		author: "Neoaz 🐊",
-		countDown: 5,
-		role: 0,
-		description: {
-			en: "Search and send songs from Facebook Music"
-		},
-		category: "media",
-		guide: {
-			en: "   {pn} <song name>: find and send the best match"
-				+ "\n   {pn} <song name> -c <count>: choose from the result list"
-				+ "\n   Example:"
-				+ "\n    {pn} Khat"
-				+ "\n    {pn} Khat -c 10"
-		}
-	},
+        config: {
+                name: "sing",
+                aliases: ["song", "audio"],
+                version: "2.0",
+                author: "Neoaz 🐊",
+                countDown: 10,
+                role: 0,
+                description: {
+                        en: "Search a song and send its audio clip"
+                },
+                category: "media",
+                guide: {
+                        en: "   {pn} <song name>: send the best matching song directly"
+                                + "\n   {pn} -c <count> <song name>: show a list of songs to choose from"
+                }
+        },
 
-	langs: {
-		en: {
-			notFound: "❌ No song matched \"%1\".",
-			choose: "🎵 Results for \"%1\":\n%2\nReply with a number to choose or any content to cancel.",
-			invalidChoice: "❌ Invalid choice, cancelled.",
-			error: "❌ An error occurred: %1",
-			unsupported: "❌ Unsupported song format."
-		}
-	},
+        langs: {
+                en: {
+                        noResult: "No song found for \"%1\"",
+                        busy: "Facebook is rate limiting music search right now, please try again in a few minutes.",
+                        choose: "Reply with the number to choose the song:\n%1",
+                        invalidReply: "Invalid choice",
+                        noAudio: "No audio available for \"%1\"",
+                        error: "An error occurred: %1"
+                }
+        },
 
-	onStart: async function ({ api, args, message, event, commandName, getLang }) {
-		let count = 0;
-		const countIndex = args.findIndex(a => a === "-c" || a === "-v" || a === "--v");
-		if (countIndex !== -1) {
-			const parsed = parseInt(args[countIndex + 1]);
-			if (!isNaN(parsed) && parsed > 0)
-				count = Math.min(parsed, 25);
-			args = args.slice();
-			args.splice(countIndex, 2);
-		}
+        onStart: async function ({ api, args, event, message, getLang, commandName }) {
+                const { count, query } = parseArgs(args);
+                if (!query)
+                        return message.SyntaxError();
 
-		const query = args.join(" ").trim();
-		if (!query)
-			return message.SyntaxError();
+                react(api, event.messageID, "⏳");
+                let results;
+                try {
+                        results = await api.searchMusic(query, { limit: count || 5 });
+                }
+                catch (err) {
+                        react(api, event.messageID, "❌");
+                        if (err.error === "RATE_LIMITED")
+                                return message.reply(getLang("busy"));
+                        return message.reply(getLang("error", err.error || err.message || JSON.stringify(err)));
+                }
+                if (!results || !results.length) {
+                        react(api, event.messageID, "❌");
+                        return message.reply(getLang("noResult", query));
+                }
 
-		await message.reaction("⏳", event.messageID);
+                if (!count)
+                        return sendAudio({ api, track: results[0], event, message, getLang });
 
-		// searchMusic ranks category containers ("MediaTag") alongside real tracks,
-		// so the top row is sometimes not playable. Pull a candidate pool and
-		// filter to playable tracks before applying the count.
-		const poolSize = count > 0 ? Math.max(count * 3, 30) : 30;
-		let results;
-		try {
-			results = await api.searchMusic(query, { limit: poolSize, first: Math.max(poolSize, 30), exact: false });
-		}
-		catch (err) {
-			await message.reaction("❌", event.messageID);
-			return message.reply(getLang("error", err.message || JSON.stringify(err)));
-		}
+                react(api, event.messageID, "✅");
+                const list = results.map((t, i) => `${i + 1}. ${formatTrack(t)}`).join("\n");
+                const thumbnails = await Promise.all(results.filter(t => t.image).map(t => getStreamFromURL(t.image)));
+                message.reply({
+                        body: getLang("choose", list),
+                        attachment: thumbnails
+                }, (err, info) => {
+                        if (err)
+                                return message.reply(getLang("error", err.error || err.message));
+                        global.GoatBot.onReply.set(info.messageID, {
+                                commandName,
+                                messageID: info.messageID,
+                                author: event.senderID,
+                                results
+                        });
+                });
+        },
 
-		const playable = (results || []).filter(track => track.url);
-		if (!playable.length) {
-			await message.reaction("❌", event.messageID);
-			return message.reply(getLang("notFound", query));
-		}
-
-		if (count > 0) {
-			const list = playable.slice(0, count);
-			let body = "";
-			let index = 1;
-			const thumbnails = [];
-			for (const track of list) {
-				body += `${index++}. ${track.title} - ${track.artist}${track.duration ? ` (${formatDuration(track.duration)})` : ""}\n`;
-				if (track.image)
-					thumbnails.push(global.utils.getStreamFromURL(track.image));
-			}
-			const attachments = await Promise.all(thumbnails.map(p => p.catch(() => null)));
-			const messageInfo = await message.reply({
-				body: getLang("choose", query, body),
-				attachment: attachments.filter(Boolean)
-			});
-			global.GoatBot.onReply.set(messageInfo.messageID, {
-				commandName,
-				messageID: messageInfo.messageID,
-				author: event.senderID,
-				results: list
-			});
-			await message.reaction("✅", event.messageID);
-			return;
-		}
-
-		await sendTrack({ api, message, event, getLang, track: playable[0] });
-	},
-
-	onReply: async function ({ api, event, message, Reply, getLang }) {
-		const choice = parseInt(event.body);
-		if (isNaN(choice) || choice < 1 || choice > Reply.results.length) {
-			await api.unsendMessage(Reply.messageID);
-			return message.reply(getLang("invalidChoice"));
-		}
-		const track = Reply.results[choice - 1];
-		await api.unsendMessage(Reply.messageID);
-		await message.reaction("⏳", event.messageID);
-		await sendTrack({ api, message, event, getLang, track });
-	}
+        onReply: async function ({ api, event, message, Reply, getLang }) {
+                const choice = parseInt(event.body);
+                if (isNaN(choice) || choice < 1 || choice > Reply.results.length)
+                        return message.reply(getLang("invalidReply"));
+                react(api, event.messageID, "⏳");
+                api.unsendMessage(Reply.messageID);
+                await sendAudio({ api, track: Reply.results[choice - 1], event, message, getLang });
+        }
 };
-
-async function sendTrack({ api, message, event, getLang, track }) {
-	const tempPath = `${__dirname}/tmp/music_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-	let filePath = null;
-	try {
-		const response = await axios({
-			url: track.url,
-			method: "GET",
-			responseType: "stream",
-			timeout: 60000
-		});
-		const extension = extensionFrom(response.headers && response.headers["content-type"]);
-		filePath = `${tempPath}.${extension}`;
-		await new Promise((resolve, reject) => {
-			const writeStream = fs.createWriteStream(filePath);
-			response.data.pipe(writeStream);
-			writeStream.on("finish", resolve);
-			writeStream.on("error", reject);
-			response.data.on("error", reject);
-		});
-
-		const size = fs.statSync(filePath).size;
-		if (!size)
-			throw new Error(getLang("unsupported"));
-
-		const caption = `${track.title} - ${track.artist}`;
-		await new Promise((resolve, reject) => {
-			message.reply({
-				body: caption,
-				attachment: fs.createReadStream(filePath)
-			}, (err) => err ? reject(err) : resolve());
-		});
-
-		await message.reaction("✅", event.messageID);
-	}
-	catch (err) {
-		await message.reaction("❌", event.messageID);
-		return message.reply(getLang("error", err.message || JSON.stringify(err)));
-	}
-	finally {
-		if (filePath && fs.existsSync(filePath))
-			fs.unlinkSync(filePath);
-	}
-}
