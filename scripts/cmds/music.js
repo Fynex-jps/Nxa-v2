@@ -1,122 +1,126 @@
-const { getStreamFromURL } = global.utils;
+module.exports = {
+	config: {
+		name: "music",
+		aliases: ["ms", "msticker"],
+		version: "1.0",
+		author: "Neoaz 🐊",
+		countDown: 5,
+		role: 0,
+		description: {
+			en: "Search and send songs as Messenger music stickers"
+		},
+		category: "media",
+		guide: {
+			en: "   {pn} <song name>: send the best match as a music sticker"
+				+ "\n   {pn} <song name> -c <count>: choose from the result list"
+				+ "\n   Example:"
+				+ "\n    {pn} Khat"
+				+ "\n    {pn} Cook Pardon -c 10"
+		}
+	},
 
-function react(api, messageID, emoji) {
-        api.setMessageReaction(emoji, messageID, () => { }, true);
-}
+	langs: {
+		en: {
+			notFound: "❌ No song matched \"%1\".",
+			choose: "🎵 Results for \"%1\":\n%2\nReply with a number to choose or any content to cancel.",
+			invalidChoice: "❌ Invalid choice, cancelled.",
+			error: "❌ An error occurred: %1"
+		}
+	},
+
+	onStart: async function ({ api, args, message, event, commandName, getLang }) {
+		let count = 0;
+		const countIndex = args.findIndex(a => a === "-c" || a === "-v" || a === "--v");
+		if (countIndex !== -1) {
+			const parsed = parseInt(args[countIndex + 1]);
+			if (!isNaN(parsed) && parsed > 0)
+				count = Math.min(parsed, 25);
+			args = args.slice();
+			args.splice(countIndex, 2);
+		}
+
+		const query = args.join(" ").trim();
+		if (!query)
+			return message.SyntaxError();
+
+		await message.reaction("⏳", event.messageID);
+
+		// searchMusic ranks category containers ("MediaTag") alongside real tracks,
+		// so the top row is sometimes not playable. Pull a candidate pool and
+		// filter to sticker-capable tracks before applying the count.
+		const poolSize = count > 0 ? Math.max(count * 3, 30) : 30;
+		let results;
+		try {
+			results = await api.searchMusic(query, { limit: poolSize, first: Math.max(poolSize, 30), exact: false });
+		}
+		catch (err) {
+			await message.reaction("❌", event.messageID);
+			return message.reply(getLang("error", err.message || JSON.stringify(err)));
+		}
+
+		const playable = (results || []).filter(track => track.songId);
+		if (!playable.length) {
+			await message.reaction("❌", event.messageID);
+			return message.reply(getLang("notFound", query));
+		}
+
+		if (count > 0) {
+			const list = playable.slice(0, count);
+			let body = "";
+			let index = 1;
+			const thumbnails = [];
+			for (const track of list) {
+				body += `${index++}. ${track.title} - ${track.artist}${track.duration ? ` (${formatDuration(track.duration)})` : ""}\n`;
+				if (track.image)
+					thumbnails.push(global.utils.getStreamFromURL(track.image));
+			}
+			const attachments = await Promise.all(thumbnails.map(p => p.catch(() => null)));
+			const messageInfo = await message.reply({
+				body: getLang("choose", query, body),
+				attachment: attachments.filter(Boolean)
+			});
+			global.GoatBot.onReply.set(messageInfo.messageID, {
+				commandName,
+				messageID: messageInfo.messageID,
+				author: event.senderID,
+				results: list
+			});
+			await message.reaction("✅", event.messageID);
+			return;
+		}
+
+		await sendSticker({ api, message, event, getLang, track: playable[0] });
+	},
+
+	onReply: async function ({ api, event, message, Reply, getLang }) {
+		const choice = parseInt(event.body);
+		if (isNaN(choice) || choice < 1 || choice > Reply.results.length) {
+			await api.unsendMessage(Reply.messageID);
+			return message.reply(getLang("invalidChoice"));
+		}
+		const track = Reply.results[choice - 1];
+		await api.unsendMessage(Reply.messageID);
+		await message.reaction("⏳", event.messageID);
+		await sendSticker({ api, message, event, getLang, track });
+	}
+};
 
 function formatDuration(ms) {
-        const total = Math.floor((Number(ms) || 0) / 1000);
-        const m = Math.floor(total / 60);
-        const s = total % 60;
-        return `${m}:${String(s).padStart(2, "0")}`;
+	if (!ms)
+		return "";
+	const totalSeconds = Math.floor(ms / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
 }
 
-function formatTrack(track) {
-        const duration = track.duration ? ` (${formatDuration(track.duration)})` : "";
-        return `${track.title || "Unknown"}${track.artist ? ` - ${track.artist}` : ""}${duration}`;
+async function sendSticker({ api, message, event, getLang, track }) {
+	try {
+		await api.sendMusicSticker(track, event.threadID);
+		await message.reaction("✅", event.messageID);
+	}
+	catch (err) {
+		await message.reaction("❌", event.messageID);
+		return message.reply(getLang("error", err.message || JSON.stringify(err)));
+	}
 }
-
-async function sendMusicSticker({ api, track, event, message, getLang }) {
-        try {
-                await api.sendMusicSticker(track, event.threadID);
-                react(api, event.messageID, "✅");
-        }
-        catch (err) {
-                react(api, event.messageID, "❌");
-                await message.reply(getLang("error", err.error || err.message || JSON.stringify(err)));
-        }
-}
-
-function parseArgs(args) {
-        const rest = args.slice();
-        let count = 0;
-        for (let i = 0; i < rest.length; i++) {
-                if (rest[i] === "-c" || rest[i] === "--count" || rest[i] === "count") {
-                        const parsed = parseInt(rest[i + 1]);
-                        count = isNaN(parsed) ? 5 : Math.min(Math.max(parsed, 1), 10);
-                        rest.splice(i, 2);
-                        break;
-                }
-        }
-        return { count, query: rest.join(" ").trim() };
-}
-
-module.exports = {
-        config: {
-                name: "music",
-                aliases: ["musicsticker", "ms"],
-                version: "2.0",
-                author: "Neoaz 🐊",
-                countDown: 10,
-                role: 0,
-                description: {
-                        en: "Search a song and send it as a Messenger music sticker"
-                },
-                category: "media",
-                guide: {
-                        en: "   {pn} <song name>: send the best matching music sticker directly"
-                                + "\n   {pn} -c <count> <song name>: show a list of songs to choose from"
-                }
-        },
-
-        langs: {
-                en: {
-                        noResult: "No song found for \"%1\"",
-                        busy: "Facebook is rate limiting music search right now, please try again in a few minutes.",
-                        choose: "Reply with the number to send the music sticker:\n%1",
-                        invalidReply: "Invalid choice",
-                        error: "An error occurred: %1"
-                }
-        },
-
-        onStart: async function ({ api, args, event, message, getLang, commandName }) {
-                const { count, query } = parseArgs(args);
-                if (!query)
-                        return message.SyntaxError();
-
-                react(api, event.messageID, "⏳");
-                let results;
-                try {
-                        results = await api.searchMusic(query, { limit: count || 5 });
-                }
-                catch (err) {
-                        react(api, event.messageID, "❌");
-                        if (err.error === "RATE_LIMITED")
-                                return message.reply(getLang("busy"));
-                        return message.reply(getLang("error", err.error || err.message || JSON.stringify(err)));
-                }
-                if (!results || !results.length) {
-                        react(api, event.messageID, "❌");
-                        return message.reply(getLang("noResult", query));
-                }
-
-                if (!count)
-                        return sendMusicSticker({ api, track: results[0], event, message, getLang });
-
-                react(api, event.messageID, "✅");
-                const list = results.map((t, i) => `${i + 1}. ${formatTrack(t)}`).join("\n");
-                const thumbnails = await Promise.all(results.filter(t => t.image).map(t => getStreamFromURL(t.image)));
-                message.reply({
-                        body: getLang("choose", list),
-                        attachment: thumbnails
-                }, (err, info) => {
-                        if (err)
-                                return message.reply(getLang("error", err.error || err.message));
-                        global.GoatBot.onReply.set(info.messageID, {
-                                commandName,
-                                messageID: info.messageID,
-                                author: event.senderID,
-                                results
-                        });
-                });
-        },
-
-        onReply: async function ({ api, event, message, Reply, getLang }) {
-                const choice = parseInt(event.body);
-                if (isNaN(choice) || choice < 1 || choice > Reply.results.length)
-                        return message.reply(getLang("invalidReply"));
-                react(api, event.messageID, "⏳");
-                api.unsendMessage(Reply.messageID);
-                await sendMusicSticker({ api, track: Reply.results[choice - 1], event, message, getLang });
-        }
-};
