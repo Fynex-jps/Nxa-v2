@@ -13,7 +13,7 @@
   "language": "en",
   "notesLanguage": "change to your language with ISO 639-1 code, available languages: vi (Vietnamese), en (English)",
   "nickNameBot": "🎀 kirito",
-  "prefix": "~",
+  "prefix": ",",
   "noprefix": {
     "enable": false,
     "notes": "when enabled, bot admins (role 2) can use all commands without any prefix. Ordinary chat text is still ignored unless its first word matches a real command name/alias."
