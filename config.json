@@ -12,7 +12,7 @@
   "antiInbox": false,
   "language": "en",
   "notesLanguage": "change to your language with ISO 639-1 code, available languages: vi (Vietnamese), en (English)",
-  "nickNameBot": "NKX 💀",
+  "nickNameBot": "🎀 kirito",
   "prefix": "~",
   "noprefix": {
     "enable": false,
@@ -27,7 +27,7 @@
     "ignoreCommand": []
   },
   "adminBot": [
-    "61588057525081"
+    "100044538830416"
   ],
   "whiteListMode": {
     "enable": false,
